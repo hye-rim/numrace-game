@@ -1,0 +1,14 @@
+{
+  "name": "numrace-game",
+  "version": "1.0.0",
+  "description": "1부터 25까지 먼저 누르는 숫자 레이스, 컴퓨터와 하거나 방 코드로 친구와 실시간 대결",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
+  }
+}
