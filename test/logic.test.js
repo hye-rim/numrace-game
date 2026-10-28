@@ -99,26 +99,66 @@ test('time up: the one who got further wins, equal is a draw', () => {
   assert.strictEqual(c.winner, 1);
 });
 
-test('computer delay stays in range and hard is faster than easy', () => {
-  const rng = seeded(21);
-  let easy = 0, hard = 0;
-  for (let k = 0; k < 500; k++) {
-    const e = L.botDelay('easy', rng), h = L.botDelay('hard', rng);
-    assert.ok(e >= L.BOT.easy[0] - L.BOT.easy[1] - 1 && e <= L.BOT.easy[0] + L.BOT.easy[1] + 1);
-    assert.ok(h >= L.BOT.hard[0] - L.BOT.hard[1] - 1 && h <= L.BOT.hard[0] + L.BOT.hard[1] + 1);
-    easy += e; hard += h;
-  }
-  assert.ok(hard < easy);
-  assert.ok(L.botDelay('nope', rng) >= 250, 'unknown level falls back');
+test('stage time limits get shorter and every stage has one', () => {
+  assert.strictEqual(L.stageMs(1), 60000);
+  for (let k = 2; k <= L.STAGE_SEC.length; k++) assert.ok(L.stageMs(k) < L.stageMs(k - 1), `stage ${k} is shorter`);
+  assert.strictEqual(L.stageMs(0), L.stageMs(1), 'below 1 clamps');
+  assert.strictEqual(L.stageMs(99), L.stageMs(L.STAGE_SEC.length), 'above the last clamps');
 });
 
-test('hard computer beats easy in simulated races (seeded)', () => {
-  const rng = seeded(77);
-  let hardWins = 0;
-  for (let k = 0; k < 100; k++) {
-    let ta = 0, tb = 0;                                      // 각자 25 개를 누르는 데 걸린 시간
-    for (let n = 0; n < 25; n++) { ta += L.botDelay('hard', rng); tb += L.botDelay('easy', rng); }
-    if (ta < tb) hardWins++;
-  }
-  assert.ok(hardWins >= 95, `hard won ${hardWins}/100`);
+test('combo multiplier grows every five and stops at the cap', () => {
+  assert.deepStrictEqual([0, 4, 5, 9, 10, 19, 20, 24, 25, 99].map(L.comboMult), [1, 1, 2, 2, 3, 4, 5, 5, 5, 5]);
+});
+
+test('solo taps score ten each and the combo raises the multiplier', () => {
+  const g = L.newSolo(1, seeded(3));
+  let total = 0;
+  for (let n = 1; n <= 10; n++) { const r = L.soloTap(g, cellOf(g, n), 1000 + n); assert.strictEqual(r.kind, 'ok'); total += r.points; }
+  // 숫자 1~5 는 x1(10점), 6~10 은 x2(20점)
+  assert.strictEqual(total, 5 * 10 + 5 * 20);
+  assert.strictEqual(g.score, total);
+  assert.strictEqual(g.combo, 10);
+});
+
+test('a wrong tap in solo breaks the combo, locks, and scores nothing', () => {
+  const g = L.newSolo(1, seeded(4));
+  for (let n = 1; n <= 6; n++) L.soloTap(g, cellOf(g, n), 100);
+  const before = g.score;
+  const r = L.soloTap(g, cellOf(g, 20), 200);
+  assert.strictEqual(r.kind, 'wrong');
+  assert.strictEqual(g.combo, 0);
+  assert.strictEqual(g.maxCombo, 6, 'best combo is remembered');
+  assert.strictEqual(g.score, before);
+  assert.strictEqual(L.soloTap(g, cellOf(g, 7), 200 + L.WRONG_LOCK_MS - 1).kind, 'ignored', 'locked');
+  const ok = L.soloTap(g, cellOf(g, 7), 200 + L.WRONG_LOCK_MS);
+  assert.deepStrictEqual([ok.kind, ok.points], ['ok', 10], 'multiplier starts over');
+});
+
+test('finishing the board clears the stage and remaining time adds 100 per second', () => {
+  const g = L.newSolo(2, seeded(6));
+  let last;
+  for (let n = 1; n <= 25; n++) last = L.soloTap(g, cellOf(g, n), 10 + n);
+  assert.strictEqual(last.kind, 'clear');
+  assert.ok(g.over && g.cleared);
+  const base = g.score;
+  assert.strictEqual(L.soloClear(g, 12340), 1234);
+  assert.strictEqual(g.score, base + 1234);
+  assert.strictEqual(L.clearBonus(-5), 0, 'no negative bonus');
+  assert.strictEqual(L.soloTap(g, 0, 99999).kind, 'ignored', 'finished board takes no more taps');
+});
+
+test('the combo and score carry into the next stage', () => {
+  const g = L.newSolo(1, seeded(8));
+  for (let n = 1; n <= 25; n++) L.soloTap(g, cellOf(g, n), n);
+  const h = L.newSolo(2, seeded(9), g);
+  assert.strictEqual(h.stage, 2);
+  assert.strictEqual(h.score, g.score);
+  assert.strictEqual(h.combo, 25);
+  assert.strictEqual(h.next, 1);
+});
+
+test('solo garbage taps are ignored', () => {
+  const g = L.newSolo(1, seeded(2));
+  for (const c of [-1, 25, 1.5, NaN, '3', null, undefined]) assert.strictEqual(L.soloTap(g, c, 1).kind, 'ignored');
+  assert.strictEqual(g.next, 1);
 });

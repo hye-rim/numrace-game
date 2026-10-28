@@ -104,6 +104,8 @@
   .lane .nm { width:74px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:none; }
   .lane .bar { position:relative; flex:1; height:20px; background:rgba(43,29,82,.45); border:3px solid var(--ink); border-radius:999px; overflow:hidden; }
   .lane .fill { position:absolute; left:0; top:0; bottom:0; width:0; background:var(--pc); transition:width .18s ease; }
+  .lane .sc { flex:1; white-space:nowrap; } .lane .sc b { font-weight:400; font-size:17px; color:var(--yellow); font-variant-numeric:tabular-nums; }
+  .lane .cb { white-space:nowrap; font-variant-numeric:tabular-nums; } .lane .cb.hot { color:#ffd23f; }
   .lane .cnt { width:42px; text-align:right; font-variant-numeric:tabular-nums; flex:none; }
   .s0 { --pc:#ff5fa2; } .s1 { --pc:#ffd23f; }
   #bbox { position:relative; width:100%; }
@@ -153,7 +155,7 @@
   <div id="col">
     <div id="hud">
       <div class="item score"><span class="value" id="turn">숫자 레이스</span></div>
-      <div class="item"><span class="label">WIN</span><span class="value" id="wins">0</span></div>
+      <div class="item"><span class="label">BEST</span><span class="value" id="wins">0</span></div>
       <div class="icons">
         <button id="resignBtn" title="기권" style="display:none">🏳</button>
         <button id="muteBtn" title="소리 (M)">🔊</button>

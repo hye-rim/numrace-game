@@ -2,29 +2,28 @@
 // 오락실 튜토리얼이 '진짜로 일어난 일'을 알아채는 신호 (arcade/public/tutorial.js 가 듣는다. 튜토리얼이 아니면 아무도 안 듣는다)
 const tutorialSignal = (type) => window.dispatchEvent(new CustomEvent('arcade:tutorial', { detail: { type } }));
 
-// 숫자 레이스: 화면·입력·소리·온라인. 규칙과 컴퓨터는 logic.js (LOGIC_NUMRACE), 방·매칭·판정은 server.js
+// 숫자 레이스: 화면·입력·소리·온라인. 규칙은 logic.js (LOGIC_NUMRACE), 방·매칭·판정은 server.js
+// 혼자 하기(기록 도전): 단계마다 제한 시간 안에 1~25 를 누르고, 남은 시간만큼 점수를 얻는다 (콤보 보너스). 온라인은 둘이 먼저 끝내기
 (() => {
 const L = LOGIC_NUMRACE;
 const $ = (id) => document.getElementById(id);
 const TUTORIAL = new URLSearchParams(location.search).has('tutorial');
 const T = { step: 1000, over: 900, banner: 1000 };                  // 시간(ms). 시험용으로 줄일 수 있다
-const RACE_MS = TUTORIAL ? 600000 : L.RACE_MS;                      // 튜토리얼은 시간이 다 되어 끝나지 않게
-const BOT_SLOW = TUTORIAL ? 12 : 1;                                 // 튜토리얼에서는 컴퓨터가 아주 느리게 (사람이 설명을 읽는 동안 이기지 않게)
+const stageTime = (stage) => (TUTORIAL ? 600000 : L.stageMs(stage));    // 튜토리얼은 시간이 다 되어 끝나지 않게
 
 // ---------- 저장소 ----------
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch (_) { return null; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch (_) {} },
 };
-let wins = Number(store.get('numraceWins')) || 0;
-let bestMs = Number(store.get('numraceBestMs')) || 0;
+let best = Number(store.get('numraceBest')) || 0, bestStage = Number(store.get('numraceBestStage')) || 0;     // 혼자 하기 최고 점수·최고 단계
 const ONLINE_KEY = 'numraceOnline', SESSION_KEY = 'numraceSession';
 const loadJson = (k) => { try { return JSON.parse(store.get(k)) || {}; } catch (_) { return {}; } };
 function loadSession() { try { return JSON.parse(sessionStorage.getItem(SESSION_KEY)); } catch (_) { return null; } }
 function saveSession(s) { try { s ? sessionStorage.setItem(SESSION_KEY, JSON.stringify(s)) : sessionStorage.removeItem(SESSION_KEY); } catch (_) {} }
 const esc = (s) => String(s).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch]);
 const myName = () => store.get('numraceName') || '';
-const fmt = (ms) => `${(ms / 1000).toFixed(2)}초`;
+const num = (n) => n.toLocaleString('ko-KR');
 
 // ---------- 소리 ----------
 let audio = null;
@@ -48,6 +47,8 @@ function tone(freq, dur, type = 'sine', vol = 0.09, slide = 0) {
 const seq = (notes, step, type = 'triangle', vol = 0.09) => notes.forEach((f, i) => setTimeout(() => tone(f, step * 0.0009, type, vol), i * step));
 const sfx = {
   tap: (n) => tone(420 + n * 14, 0.05, 'triangle', 0.07),          // 숫자가 커질수록 높은 소리
+  combo: (m) => seq([784, 988, 1175].slice(0, Math.min(3, m)), 55, 'triangle', 0.08),   // 배수가 오를 때
+  clear: () => seq([523, 659, 784, 1047, 1319], 90, 'triangle', 0.1),
   bad: () => tone(140, 0.22, 'sawtooth', 0.06, -50),
   beep: () => tone(660, 0.1, 'square', 0.06),
   go: () => tone(990, 0.22, 'square', 0.07),
@@ -60,13 +61,14 @@ $('muteBtn').onclick = (e) => { e.currentTarget.blur(); toggleMute(); };
 $('muteBtn').textContent = muted ? '🔇' : '🔊';
 
 // ---------- 상태 ----------
-let mode = 'easy';                  // 'easy' · 'hard' (컴퓨터) · 'online'
+let mode = 'solo';                  // 'solo' (혼자 하기) · 'online'
 let phase = 'title';                // title · play · over
-let st = null;                      // 컴퓨터 대전 판 (나는 0번)
-let cpuState = 'countdown';         // countdown · playing · over
-let startedAt = 0, finishedMs = 0, deadline = 0;
+let st = null;                      // 혼자 하기: 지금 단계의 판
+let run = null;                     // 혼자 하기: 이번 도전 { wrong, stageClears } (점수·콤보는 st 에 이어진다)
+let cpuState = 'countdown';         // 혼자 하기 단계 상태: countdown · playing · over
+let deadline = 0;
 let room = null, waitingNet = false, netDown = false, recorded = '';
-let countTimers = [], botTimer = 0, raceTimer = 0, overTimer = 0, bannerTimer = 0, tickTimer = 0;
+let countTimers = [], raceTimer = 0, overTimer = 0, bannerTimer = 0, tickTimer = 0;
 let lockEnd = 0, countEnd = 0, raceEnd = 0;                         // performance.now() 기준 시각
 let badCell = -1, lastSent = -1;
 const online = () => mode === 'online';
@@ -79,7 +81,7 @@ function model() {
       names: [0, 1].map((c) => (c === room.you ? '나' : ((room.players.find((p) => p.color === c) || {}).name || '상대'))) };
   }
   if (!st) return null;
-  return { board: cpuState === 'countdown' ? null : st.board, next: st.next, wrong: st.wrong, you: 0, state: cpuState, winner: st.winner, reason: st.reason, names: ['나', '컴퓨터'] };
+  return { solo: true, board: cpuState === 'countdown' ? null : st.board, next: [st.next, 1], wrong: [st.wrong, 0], you: 0, state: cpuState, winner: -1, reason: '', names: ['나', ''] };
 }
 const lockLeft = () => Math.max(0, lockEnd - performance.now());
 
@@ -109,18 +111,21 @@ function render() {
     const done = Math.min(L.SIZE, next - 1);
     $(id).innerHTML = `<span class="nm">${esc(name)}</span><div class="bar"><div class="fill" style="width:${(done / L.SIZE) * 100}%"></div></div><span class="cnt">${done}/${L.SIZE}</span>`;
   };
-  lane('laneTop', m.names[1 - m.you], 1, theirs);
+  if (m.solo) {
+    const mult = L.comboMult(st.combo);
+    $('laneTop').innerHTML = `<span class="nm">${st.stage}단계</span><span class="sc">점수 <b>${num(st.score)}</b></span><span class="cb${st.combo >= L.COMBO_STEP ? ' hot' : ''}">🔥 ${st.combo}콤보${mult > 1 ? ` x${mult}` : ''}</span>`;
+  } else lane('laneTop', m.names[1 - m.you], 1, theirs);
   lane('laneBottom', m.names[m.you], 0, mine);
   $('target').innerHTML = m.state === 'playing' && mine <= L.SIZE ? `다음 숫자 <b>${mine}</b>` : (m.state === 'countdown' ? '곧 시작해요! 1부터 순서대로 눌러요' : '');
   renderHud(m);
 }
 function renderHud(m = model()) {
-  $('wins').textContent = wins.toLocaleString('ko-KR');
+  $('wins').textContent = num(best);
   let text = '숫자 레이스';
   if (m && phase === 'play') {
     if (online() && netDown) text = '연결 다시 붙이는 중…';
     else if (m.state === 'countdown') text = '준비…';
-    else if (m.state === 'playing') text = `남은 시간 ${Math.max(0, Math.ceil(((online() ? raceEnd : deadline) - performance.now()) / 1000))}초`;
+    else if (m.state === 'playing') text = `${m.solo ? `${st.stage}단계 · ` : ''}남은 시간 ${Math.max(0, Math.ceil(((online() ? raceEnd : deadline) - performance.now()) / 1000))}초`;
   }
   $('turn').textContent = text;
   $('resignBtn').style.display = online() && room && (room.state === 'playing' || room.state === 'countdown') ? '' : 'none';
@@ -153,10 +158,13 @@ grid.addEventListener('pointerdown', (e) => {
   const i = Number(el.dataset.i);
   if (lockLeft() > 0) return;
   if (online()) { lastSent = i; net.send('tap', { cell: i }); return; }
-  const r = L.tap(st, 0, i, Date.now());
-  if (r.kind === 'ok' || r.kind === 'finish') {
+  const prevMult = L.comboMult(st.combo);
+  const r = L.soloTap(st, i, Date.now());
+  if (r.kind === 'ok' || r.kind === 'clear') {
     sfx.tap(r.number); tutorialSignal('tap');
-    if (r.kind === 'finish') { finishedMs = Date.now() - startedAt; endCpu(); return; }
+    const mult = L.comboMult(st.combo);
+    if (mult > prevMult) { sfx.combo(mult); banner(`콤보 x${mult}!`, '#ffd23f'); }
+    if (r.kind === 'clear') { stageClear(); return; }
     render();
   } else if (r.kind === 'wrong') {
     lockEnd = performance.now() + L.WRONG_LOCK_MS;
@@ -167,70 +175,80 @@ grid.addEventListener('pointerdown', (e) => {
 });
 addEventListener('keydown', (e) => { if (e.code === 'KeyM') toggleMute(); });
 
-// ---------- 컴퓨터 대전 ----------
+// ---------- 혼자 하기 ----------
 function clearTimers() {
   countTimers.forEach(clearTimeout); countTimers = [];
-  clearTimeout(botTimer); clearTimeout(raceTimer); clearTimeout(overTimer); clearTimeout(tickTimer);
+  clearTimeout(raceTimer); clearTimeout(overTimer); clearTimeout(tickTimer);
 }
-function startCpu(level) {
+function startSolo() {
   leaveOnline();
   clearTimers();
-  mode = level; st = L.newRace(); phase = 'play'; cpuState = 'countdown'; lockEnd = 0; badCell = -1; finishedMs = 0;
-  hideOverlay(); render(); say('');
-  const steps = ['3', '2', '1'];
-  steps.forEach((txt, k) => countTimers.push(setTimeout(() => { showCount(txt); sfx.beep(); }, k * T.step)));
-  countTimers.push(setTimeout(beginCpu, steps.length * T.step));
+  mode = 'solo'; run = { wrong: 0 }; hideOverlay();
+  prepStage(L.newSolo(1), true);
 }
-function beginCpu() {
+// 단계 시작 전: 첫 단계는 3-2-1, 다음 단계부터는 "N단계" 를 잠깐 보여 준다 (그동안 판은 가려져 있다)
+function prepStage(next, first) {
+  clearTimers();
+  st = next; phase = 'play'; cpuState = 'countdown'; lockEnd = 0; badCell = -1;
+  render(); say(first ? '' : `${st.stage}단계! 제한 시간 ${stageTime(st.stage) / 1000}초`);
+  const steps = first ? ['3', '2', '1'] : [`${st.stage}단계`];
+  steps.forEach((txt, k) => countTimers.push(setTimeout(() => { showCount(txt); sfx.beep(); }, k * T.step)));
+  countTimers.push(setTimeout(beginStage, steps.length * T.step));
+}
+function beginStage() {
   showCount('GO!'); sfx.go();
   setTimeout(hideCount, 450);
-  cpuState = 'playing'; startedAt = Date.now(); deadline = performance.now() + RACE_MS;
-  raceTimer = setTimeout(() => { if (cpuState === 'playing') { L.timeUp(st); endCpu(); } }, RACE_MS);
-  render(); say('1부터 순서대로 눌러요! 틀리면 잠깐 멈춰요');
-  scheduleBot();
+  cpuState = 'playing'; deadline = performance.now() + stageTime(st.stage);
+  raceTimer = setTimeout(() => { if (cpuState === 'playing') timeUpSolo(); }, stageTime(st.stage));
+  render(); say('1부터 순서대로 눌러요! 틀리면 멈추고 콤보가 끊겨요');
 }
-function scheduleBot() { botTimer = setTimeout(botTap, L.botDelay(mode === 'hard' ? 'hard' : 'easy') * BOT_SLOW); }
-function botTap() {
-  if (cpuState !== 'playing' || !st || st.over) return;
-  const r = L.tap(st, 1, st.board.indexOf(st.next[1]), Date.now());
-  if (r.kind === 'finish') { endCpu(); return; }
-  render();
-  scheduleBot();
-}
-function endCpu() {
+function stageClear() {
+  clearTimeout(raceTimer);
   cpuState = 'over';
-  clearTimeout(botTimer); clearTimeout(raceTimer);
+  const remain = Math.max(0, deadline - performance.now());
+  const bonus = L.soloClear(st, remain);
+  run.wrong += st.wrong;
+  sfx.clear();
+  banner(`클리어! +${num(bonus)}`, '#b9ffc8');
+  say(`${st.stage}단계 클리어! 남은 ${(remain / 1000).toFixed(1)}초 → +${num(bonus)}점`);
   render();
-  overTimer = setTimeout(showOver, T.over);
+  tutorialSignal('stage');
+  const last = st.stage >= L.STAGE_SEC.length;
+  overTimer = setTimeout(() => (last ? finishSolo(true) : prepStage(L.newSolo(st.stage + 1, Math.random, st), false)), T.over + 900);
 }
-const reasonText = { finish: '', timeout: '시간이 다 되어 더 멀리 간 쪽이 이겼어요' };
-function showOver() {
+function timeUpSolo() {
+  clearTimeout(raceTimer);
+  cpuState = 'over';
+  run.wrong += st.wrong;
+  render();
+  overTimer = setTimeout(() => finishSolo(false), T.over);
+}
+function finishSolo(all) {
   phase = 'over';
-  const youWon = st.winner === 0, draw = st.winner === 2;
+  const reached = all ? L.STAGE_SEC.length : st.stage;
+  const cleared = all ? reached : reached - 1;                           // 깬 단계 수
   let newBest = false;
-  if (youWon) {
-    wins++; store.set('numraceWins', String(wins)); sfx.win();
-    if (st.reason === 'finish' && finishedMs && (!bestMs || finishedMs < bestMs) && !TUTORIAL) { bestMs = finishedMs; store.set('numraceBestMs', String(bestMs)); newBest = true; }
-  } else if (draw) sfx.draw(); else sfx.lose();
+  if (!TUTORIAL && st.score > best) { best = st.score; newBest = true; store.set('numraceBest', String(best)); }
+  if (!TUTORIAL && cleared > bestStage) { bestStage = cleared; store.set('numraceBestStage', String(bestStage)); }
+  all ? sfx.win() : (cleared > 0 ? sfx.draw() : sfx.lose());
   showOverlay(`
-    <h2>${draw ? '비겼어요! 🤝' : youWon ? '이겼어요! 🎉' : '아쉬워요! 😵'}</h2>
-    <p>${esc(youWon && st.reason === 'finish' ? '25까지 먼저 눌렀어요' : (st.reason === 'timeout' ? reasonText.timeout : '컴퓨터가 먼저 25까지 눌렀어요'))}</p>
-    <dl class="stats card2"><dt>나의 진행</dt><dd>${Math.min(25, st.next[0] - 1)} / 25</dd><dt>컴퓨터</dt><dd>${Math.min(25, st.next[1] - 1)} / 25</dd><dt>틀린 횟수</dt><dd>${st.wrong[0]}번</dd>${youWon && st.reason === 'finish' ? `<dt>내 기록</dt><dd>${fmt(finishedMs)}${newBest ? ' 🏅 최고!' : ''}</dd>` : ''}${bestMs ? `<dt>최고 기록</dt><dd>${fmt(bestMs)}</dd>` : ''}</dl>
-    <p>컴퓨터 상대 승리 <b>${wins}</b>번</p>
-    <div class="col"><button data-act="again">다시 하기</button><button class="sub" data-act="view">판 보기</button><button class="sub" data-act="home">처음으로</button></div>`);
+    <h2>${all ? '전 단계 클리어! 🎉' : '시간 끝! ⏰'}</h2>
+    <p>${all ? `${L.STAGE_SEC.length}단계를 모두 깼어요!` : `${reached}단계에서 ${cleared > 0 ? `${cleared}단계까지 깼어요` : '시간이 모자랐어요'}`}</p>
+    <dl class="stats card2"><dt>점수</dt><dd>${num(st.score)}점${newBest ? ' 🏅 최고!' : ''}</dd><dt>깬 단계</dt><dd>${cleared} / ${L.STAGE_SEC.length}</dd><dt>최고 콤보</dt><dd>${st.maxCombo}</dd><dt>틀린 횟수</dt><dd>${run.wrong}번</dd><dt>최고 점수</dt><dd>${num(best)}점</dd></dl>
+    <div class="col"><button data-act="again">다시 도전</button><button class="sub" data-act="view">판 보기</button><button class="sub" data-act="home">처음으로</button></div>`);
   render();
 }
 function showTitle() {
   leaveOnline();
   clearTimers(); hideCount();
-  mode = 'easy'; phase = 'title'; st = L.newRace(); cpuState = 'countdown'; lockEnd = 0; badCell = -1;
+  mode = 'solo'; phase = 'title'; st = L.newSolo(); run = null; cpuState = 'countdown'; lockEnd = 0; badCell = -1;
   say(''); render();
   const on = loadJson(ONLINE_KEY);
   showOverlay(`
     <h1>숫자 레이스</h1>
-    <p>흩어진 <b>1~25</b>를 <b>1부터 순서대로</b> 먼저 누르면 이겨요!</p>
-    <div class="card2" style="font-size:13px">같은 판을 보고 둘이 동시에 달려요<br>틀린 숫자를 누르면 <b>0.6초 멈춰요</b><br>90초 안에 못 끝내면 더 멀리 간 쪽이 이겨요${bestMs ? `<br>내 최고 기록 <b>${fmt(bestMs)}</b>` : ''}</div>
-    <div class="col"><button data-act="cpu" data-lv="easy">🤖 컴퓨터랑 · 쉬움</button><button class="sub" data-act="cpu" data-lv="hard">🤖 컴퓨터랑 · 어려움</button><button class="sub" data-act="online">🌐 온라인 대전${on.w || on.l ? ` · ${on.w || 0}승 ${on.l || 0}패` : ''}</button></div>`);
+    <p>흩어진 <b>1~25</b>를 <b>1부터 순서대로</b> 빨리 눌러요!</p>
+    <div class="card2" style="font-size:13px"><b>혼자 하기</b>: 단계마다 제한 시간이 있어요 (60초 → 26초, 10단계)<br>빨리 끝낼수록 <b>남은 시간만큼 점수</b>를 얻어요 (1초 = 100점)<br>안 틀리고 이어서 맞히면 <b>콤보</b>! 5개마다 점수가 x2, x3 … 최대 x5<br>틀리면 <b>0.6초 멈추고 콤보가 끊겨요</b>${best ? `<br>내 최고 점수 <b>${num(best)}점</b> · ${bestStage}단계` : ''}</div>
+    <div class="col"><button data-act="solo">🏃 혼자 하기 · 기록 도전</button><button class="sub" data-act="online">🌐 온라인 대전${on.w || on.l ? ` · ${on.w || 0}승 ${on.l || 0}패` : ''}</button></div>`);
 }
 
 // ---------- 온라인: 연결 ----------
@@ -291,7 +309,7 @@ function leaveOnline() {
   net.send('leave'); net.close();
   clearInterval(tickTimer);
   saveSession(null);
-  room = null; netDown = false; mode = 'easy'; phase = 'title'; hideCount();
+  room = null; netDown = false; mode = 'solo'; phase = 'title'; hideCount();
 }
 
 // ---------- 온라인: 경기 ----------
@@ -416,15 +434,13 @@ function confirmResign() {
   $('overlay').dataset.screen = 'confirm';
 }
 
-let lastCpu = 'easy';
 $('overlay').addEventListener('click', (e) => {
   const btn = e.target.closest('button');
   if (!btn) return;
   btn.blur();
   $('overlay').dataset.screen = '';
   const act = btn.dataset.act;
-  if (act === 'cpu') { lastCpu = btn.dataset.lv; startCpu(lastCpu); }
-  else if (act === 'again') startCpu(lastCpu);
+  if (act === 'solo' || act === 'again') startSolo();
   else if (act === 'home') showTitle();
   else if (act === 'online') showOnline();
   else if (act === 'quick') { saveName(); net.send('quick'); }
@@ -472,6 +488,6 @@ if (loadSession()) {
 else showTitle();
 
 /* @test-hooks:start */
-window.__nr = { get st() { return st; }, get mode() { return mode; }, get phase() { return phase; }, get room() { return room; }, get cpuState() { return cpuState; }, T, startCpu, render, model, L };
+window.__nr = { get st() { return st; }, get run() { return run; }, get mode() { return mode; }, get phase() { return phase; }, get room() { return room; }, get cpuState() { return cpuState; }, T, startSolo, render, model, L };
 /* @test-hooks:end */
 })();
